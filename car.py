@@ -118,9 +118,9 @@ def setup(adapter):
             break
         file_increment += 1
 
-    with open(file_path, "w") as file:
+    with open(file_path, "w") as f:
         log(f"Writing to {file_path}")
-        file.write("runtime,ampg,fuel_level\n")
+        f.write("runtime,ampg,fuel_level\n")
 
     return file_path
 
@@ -369,8 +369,8 @@ def main():
             runtime = state["runtime"] if state["runtime"] is not None else 0.0
             ampg = state["ampg"] if state["ampg"] is not None else 0.0
             fuel_level = state["fuel_level"] if state["fuel_level"] is not None else 0.0
-            with open(trip_path, "a") as file:
-                file.write(
+            with open(trip_path, "a") as f:
+                f.write(
                     str(round(runtime, 2))
                     + ","
                     + str(round(ampg, 2))
@@ -378,7 +378,7 @@ def main():
                     + str(round(fuel_level, 1))
                     + "\n"
                 )
-                file.flush()
+                f.flush()
 
 
 if __name__ == "__main__":
