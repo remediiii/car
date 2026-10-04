@@ -7,7 +7,8 @@ Running down the list of what this script does:
  - Once the car is detected, the first thing we'll do is dump all supported PIDs as well as grabbing a sample pool of data from each PID into a folder
    named after the car's VIN. Ideally, this script can be ran on several cars, but for my purposes it's explicitly tuned for my own Accord.
  - We then create a folder named trips, and open a file for writing there. Ideally these files would be named after a true timestamp but the
-   Pi doesn't have a realtime clock, and we don't expect internet access. This file will infrequently have trip data written to it, such as runtime, recorded aMPG, and fuel level.
+   Pi doesn't have a realtime clock, and we don't expect internet access. This file will infrequently have trip data 
+   written to it, such as runtime, recorded aMPG, and fuel level.
  - We then spin up a few threads, namely obd_worker and mpg_worker. obd_worker will asyncronously collect all neccessary data at all times, while mpg_worker
    will continue aMPG calculations in the background.
  - Finally, we get to the main loop, which is nothing more than a few simple state checks and LCD display commands.
@@ -130,7 +131,8 @@ stop_event = threading.Event()
 
 
 def gear_worker():
-    """THREAD: Calculates current gear based off of vehicle speed and RPM. Unusually, we will also use this thread to write to the LCD. This is probably bad?
+    """THREAD: Calculates current gear based off of vehicle speed and RPM. Unusually, we will also use this thread to 
+    write to the LCD. This is probably bad? We're holding LCD lock now, so it should be okay.
     Gear display will show up as it's own single character in the first row, last column of the display.
     This isn't very accurate. Just for fun. Can we make this better?"""
     while True:
