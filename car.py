@@ -179,7 +179,11 @@ def obd_worker():
 
 def mpg_worker():
     """THREAD: Calculate instant MPG based on speed, maf, and equiv ratio values. Compare sample IDs
-    to ensure that data is only calculated when samples are guaranteed fresh."""
+    to ensure that data is only calculated when samples are guaranteed fresh.
+
+    aMPG is currently not calculated correctly. It calculates with all accumulated iMPG values, but not
+    ones at rest. OBD cannot show distance travelled.
+    """
     ampg_sample_count = 0
     last_sample_id = 0
     while not stop_event.is_set():
@@ -204,9 +208,7 @@ def mpg_worker():
                     if state["ampg"] is None:
                         state["ampg"] = impg
                     else:
-                        state["ampg"] += (
-                            impg - state["ampg"]
-                        ) / ampg_sample_count
+                        state["ampg"] += (impg - state["ampg"]) / ampg_sample_count
                     state["ampg"] = min(state["ampg"], 99.99)
                 else:
                     state["impg"] = None
@@ -344,12 +346,8 @@ def main():
         # better, or perhaps we only read the fuel level when the car is travelling slow enough.
         # Right now, it'll only display the fuel level when we're going slow enough, since any other time, it's probably unreliable.
         fuel_level = state["fuel_level"]
-        speed = state['speed']
-        if (
-            speed is not None
-            and speed < 3
-            and fuel_level is not None
-        ):
+        speed = state["speed"]
+        if speed is not None and speed < 3 and fuel_level is not None:
             lcd_msg("Fuel level:", str(round(fuel_level, 1)) + "%", True)
             time.sleep(5)
 
