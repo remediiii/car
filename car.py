@@ -47,37 +47,23 @@ state = {
     # These values should never exceed 99.99 due to min() in mpg_worker().
     "impg": None,
     "ampg": None,
+    "gear": None,
 }
+
 
 def log(log):
     print(f"[{datetime.datetime.now}] {log}")
 
-    
-def lcd_msg(l1="", l2=""):
-    """Takes up to two strings. Clears the LCD and display two lines of text."""
-    lcd.lcd_clear()
-    lcd.lcd_display_string(str(l1)[:16], 1)
-    lcd.lcd_display_string(str(l2)[:16], 2)
 
-
-def calculate_gear(speed_mph, rpm):
-    """Calculates current gear based off of vehicle speed and RPM.
-    This isn't very accurate. Just for fun. Can we make this better?"""
-    if speed_mph <= 5:
-        return "?"
-
-    wheel_rpm = speed_mph * 63360 / (TIRE_CIRCUMFERENCE * 60)
-
-    theGear = None
-    prediction = float("inf")
-    for gear, ratio in GEAR_RATIOS.items():
-        expected_rpm = wheel_rpm * ratio * FINAL_DRIVE
-        error = abs(rpm - expected_rpm)
-
-        if error < prediction:
-            prediction = error
-            theGear = gear
-    return theGear
+def lcd_msg(clear_lcd=False, l1=None, l2=None):
+    """Takes up to two strings. Clears the LCD and displays up to lines of text. Holds lock on LCD processing."""
+    with lcd_lock:
+        if clear_lcd:
+            lcd.lcd_clear()
+        if l1 is not None:
+            lcd.lcd_display_string(str(l1)[:16], 1)
+        if l2 is not None:
+            lcd.lcd_display_string(str(l2)[:16], 2)
 
 
 def setup(adapter):
@@ -139,8 +125,36 @@ def setup(adapter):
     return file_path
 
 
+lcd_lock = threading.Lock()
 lock = threading.Lock()
 stop_event = threading.Event()
+
+
+def gear_worker():
+    """THREAD: Calculates current gear based off of vehicle speed and RPM. Unusually, we will also use this thread to write to the LCD. This is probably bad?
+    Gear display will show up as it's own single character in the first row, last column of the display.
+    This isn't very accurate. Just for fun. Can we make this better?"""
+    while True:
+        speed_mph = state["speed"]
+        rpm = state["rpm"]
+        if speed_mph <= 5:
+            with lcd_lock:
+                lcd.lcd_display_string("?", 1, 16)
+        else:
+            wheel_rpm = speed_mph * 63360 / (TIRE_CIRCUMFERENCE * 60)
+
+            prediction = float("inf")
+            for gear, ratio in GEAR_RATIOS.items():
+                expected_rpm = wheel_rpm * ratio * FINAL_DRIVE
+                error = abs(rpm - expected_rpm)
+
+                if error < prediction:
+                    prediction = error
+                    state["gear"] = gear
+                with lcd_lock:
+                    lcd.lcd_display_string(state["gear"], 1, 16)
+
+        time.sleep(0.5)
 
 
 def obd_worker():
@@ -267,7 +281,7 @@ def get_runtime():
 def main():
     global adapter
     # Initialize LCD and attempt to connect to OBD adapter, if not detected, keep trying
-    lcd_msg("Initializing...")
+    lcd_msg("Initializing...", None, True)
     adapter = obd.OBD()
     last_status = None
     while True:
@@ -277,11 +291,11 @@ def main():
         if last_status is not status:
             match status:
                 case OBDStatus.NOT_CONNECTED:
-                    lcd_msg("Adapter not", "detected...")
+                    lcd_msg("Adapter not", "detected...", True)
                 case OBDStatus.ELM_CONNECTED:
-                    lcd_msg("Adapter detected", "No car connected")
+                    lcd_msg("Adapter detected", "No car connected", True)
                 case OBDStatus.OBD_CONNECTED:
-                    lcd_msg("Car connected", "Is ignition off?")
+                    lcd_msg("Car connected", "Is ignition off?", True)
         last_status = status
         adapter = obd.OBD()
         time.sleep(0.5)
@@ -300,45 +314,39 @@ def main():
     obd_thread.start()
     mpg_thread = threading.Thread(target=mpg_worker, daemon=True)
     mpg_thread.start()
+    gear_thread = threading.Thread(target=gear_worker, daemon=True)
+    gear_thread.start()
 
     loop_count = 0
     lcd.lcd_clear()
     while True:
         loop_count += 1
-        # Calculate gear
-        # Commenting this out for now because it conflicts with the obd_thread
-        # and it's kind of ass anyways. this should really display the gear in the top right of the display no matter what screen the lcd is on
-        # lcd_msg("Predicted gear:")
-        # for _ in range(10):
-        #     gear = calculate_gear(state["speed"], state["rpm"])
-        #     lcd.lcd_display_string(gear, 2)
-        #     time.sleep(0.5)
 
         # Instant MPG
-        lcd_msg("Instant MPG:")
+        lcd_msg("Instant MPG:", None, True)
         for _ in range(5):
             if state["impg"] is not None:
-                lcd.lcd_display_string(str(state["impg"]), 2)
+                lcd_msg(None, str(round(state["impg"])))
             else:
-                lcd.lcd_display_string("----", 2)
+                lcd_msg(None, "----")
             time.sleep(1)
 
         # Average MPG (calculated through mpg_worker())
-        lcd_msg("Average MPG:")
+        lcd_msg("Average MPG:", None, True)
         for _ in range(5):
             if state["ampg"] is not None:
-                lcd.lcd_display_string(str(round(state["ampg"], 2)), 2)
+                lcd_msg(None, str(round(state["ampg"])))
             else:
-                lcd.lcd_display_string("----", 2)
+                lcd_msg(None, "----")
             time.sleep(1)
 
         # Coolant temp
-        lcd_msg("Coolant temp:")
+        lcd_msg("Coolant temp:", None, True)
         for _ in range(5):
             if state["coolant_temp"] is not None:
-                lcd.lcd_display_string(str(state["coolant_temp"]) + "C", 2)
+                lcd_msg(None, str(state["coolant_temp"]) + "C")
             else:
-                lcd.lcd_display_string("----", 2)
+                lcd_msg(None, "----")
             time.sleep(1)
 
         # Fuel level
@@ -351,7 +359,7 @@ def main():
             and state["speed"] < 3
             and state["fuel_level"] is not None
         ):
-            lcd_msg("Fuel level:", str(round(state["fuel_level"], 1)) + "%")
+            lcd_msg("Fuel level:", str(round(state["fuel_level"], 1)) + "%", True)
             time.sleep(5)
 
         # Car trip stats, write aMPG and fuel levels to file.
