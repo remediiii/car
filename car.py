@@ -32,6 +32,7 @@ TIRE_DIAMETER = 25.8583  # P225/50 R17
 ###
 
 TIRE_CIRCUMFERENCE = TIRE_DIAMETER * math.pi
+GASOLINE_DENSITY = 6.1738  # pounds per gallon
 
 lcd = I2C_LCD_driver.lcd()
 
@@ -51,18 +52,27 @@ state = {
     "ampg": None,
 }
 
+lcd_lock = threading.Lock()
+file_lock = threading.Lock()
+lock = threading.Lock()
+stop_event = threading.Event()
+
 
 def log(log):
     print(f"[{datetime.datetime.now()}] {log}")
 
 
-def lcd_msg(l1=None, l2=None, clear_lcd=False):
+def lcd_msg(l1=None, l2=None, clear_lcd=False, setup=False):
     """Clears the LCD (if set) and displays up to lines of text. Holds lock on LCD processing."""
     with lcd_lock:
         if clear_lcd:
             lcd.lcd_clear()
         for line, message in enumerate((l1, l2), start=1):
-            if message is not None:
+            if message is not None and setup is False:
+                lcd.lcd_display_string(
+                    str(message)[:14], line
+                )  # we reserve some space for the gear display
+            else:
                 lcd.lcd_display_string(str(message)[:16], line)
 
 
@@ -72,12 +82,12 @@ def setup(adapter):
     attempt to make this cross-carpatible. Next, read and dump every code the car says it supports. Last, get a sample pool of data. This
     should be run before doing ANY work, as it'll conflict with the obd_worker thread. Returns file.
     """
-    state["vin"] = str(adapter.query(obd.commands.VIN).value.magnitude)
+    state["vin"] = str(adapter.query(obd.commands.VIN).value.decode("utf-8"))
     vin_dir = state["vin"]
 
     # Create a folder for the car's data and move into it for data collection
     if not os.path.exists(vin_dir):
-        lcd_msg(f"New VIN detected", "Setting up...")
+        lcd_msg("New VIN detected", "Setting up...", setup=True)
         os.mkdir(vin_dir)
         os.chdir(vin_dir)
         # Dump the car's supported commands to an external file
@@ -125,35 +135,33 @@ def setup(adapter):
     return file_path
 
 
-lcd_lock = threading.Lock()
-lock = threading.Lock()
-stop_event = threading.Event()
-
-
 def gear_worker():
-    """THREAD: Calculates current gear based off of vehicle speed and RPM. Unusually, we will also use this thread to 
+    """THREAD: Calculates current gear based off of vehicle speed and RPM. Unusually, we will also use this thread to
     write to the LCD. This is probably bad? We're holding LCD lock now, so it should be okay.
     Gear display will show up as it's own single character in the first row, last column of the display.
     This isn't very accurate. Just for fun. Can we make this better?"""
     while True:
-        speed_mph = state["speed"]
+        speed = state["speed"]
         rpm = state["rpm"]
-        if speed_mph is None or rpm is None or speed_mph <= 5:
+        if speed is None or rpm is None or speed <= 5:
             with lcd_lock:
-                lcd.lcd_display_string("?", 1, 16)
+                lcd.lcd_display_string("G?", 1, 14)
         else:
-            wheel_rpm = speed_mph * 63360 / (TIRE_CIRCUMFERENCE * 60)
+            wheel_rpm = speed * 63360 / (TIRE_CIRCUMFERENCE * 60)
 
             prediction = float("inf")
             for gear, ratio in GEAR_RATIOS.items():
                 expected_rpm = wheel_rpm * ratio * FINAL_DRIVE
                 error = abs(rpm - expected_rpm)
 
-                if error < prediction:
+                if error < prediction and error < 200:
                     prediction = error
                     state["gear"] = gear
+                else:
+                    with lcd_lock:
+                        lcd.lcd_display_string("G?", 1, 14)
             with lcd_lock:
-                lcd.lcd_display_string(state["gear"], 1, 16)
+                lcd.lcd_display_string(f"G{state["gear"]}", 1, 14)
 
         time.sleep(0.5)
 
@@ -202,7 +210,10 @@ def mpg_worker():
                 ):
                     # formula from https://manuals.plus/m/8f08573961e7c5e83133532cdd853b80026fa4487393a7c52304287d758e9f39
                     impg = (
-                        (14.7 / state["equiv_ratio"]) * 6.1738 * 454 * state["speed"]
+                        (14.7 / state["equiv_ratio"])
+                        * GASOLINE_DENSITY
+                        * 454
+                        * state["speed"]
                     ) / (3600 * state["maf"])
                     impg = min(impg, 99.99)
                     state["impg"] = impg
@@ -219,9 +230,9 @@ def mpg_worker():
 
 # Getters
 # These all return the raw values of each query, no units included. If a query fails for any reason, None is returned.
-def get_speed():
+def get_speed():  # in MPH
     try:
-        return adapter.query(obd.commands.SPEED, force=True).value.magnitude
+        return adapter.query(obd.commands.SPEED, force=True).value.to("mph").magnitude
     except Exception as e:
         log(f"Error occurred while fetching speed: {e}")
         return None
@@ -277,25 +288,60 @@ def get_runtime():
         return None
 
 
+def get_throttle_pos():
+    try:
+        return adapter.query(
+            obd.commands.RELATIVE_THROTTLE_POS, force=True
+        ).value.magnitude
+    except Exception as e:
+        log(f"Error occurred while fetching relative throttle position: {e}")
+        return None
+
+
+def get_accel_pos():
+    try:
+        return adapter.query(obd.commands.ACCELERATOR_POS_D, force=True).value.magnitude
+    except Exception as e:
+        log(f"Error occurred while fetching accelerator position: {e}")
+        return None
+
+
+def get_voltage():
+    try:
+        return adapter.query(
+            obd.commands.CONTROL_MODULE_VOLTAGE, force=True
+        ).value.magnitude
+    except Exception as e:
+        log(f"Error occurred while fetching voltage: {e}")
+        return None
+
+
 def main():
     global adapter
     # Initialize LCD and attempt to connect to OBD adapter, if not detected, keep trying
-    lcd_msg("Initializing...", None, True)
+    lcd_msg("Initializing...", clear_lcd=True, setup=True)
     adapter = obd.OBD()
     last_status = None
     while True:
         status = adapter.status()
         if status is OBDStatus.CAR_CONNECTED:
-            lcd_msg("Connected!", None, True)
+            lcd_msg("Connected!", clear_lcd=True, setup=True)
             break
         if last_status is not status:
             match status:
                 case OBDStatus.NOT_CONNECTED:
-                    lcd_msg("Adapter not", "detected...", True)
+                    lcd_msg("Adapter not", "detected...", clear_lcd=True, setup=True)
                 case OBDStatus.ELM_CONNECTED:
-                    lcd_msg("Adapter detected", "No car connected", True)
+                    lcd_msg(
+                        "Adapter detected",
+                        "No car connected",
+                        clear_lcd=True,
+                        setup=True,
+                    )
                 case OBDStatus.OBD_CONNECTED:
-                    lcd_msg("Car connected", "Is ignition off?", True)
+                    lcd_msg(
+                        "Car connected", "Is ignition off?", clear_lcd=True, setup=True
+                    )
         last_status = status
         adapter = obd.OBD()
         time.sleep(0.5)
@@ -322,24 +368,24 @@ def main():
         loop_count += 1
 
         # Instant MPG
-        lcd_msg("Instant MPG:", None, True)
+        lcd_msg("Instant MPG:", clear_lcd=True)
         for _ in range(5):
             impg = state["impg"]
-            lcd_msg(None, str(round(impg)) if impg is not None else "----")
+            lcd_msg(None, str(round(impg), 2) if impg is not None else "----")
             time.sleep(1)
 
         # Average MPG (calculated through mpg_worker())
-        lcd_msg("Average MPG:", None, True)
+        lcd_msg("Average MPG:", clear_lcd=True)
         for _ in range(5):
             ampg = state["ampg"]
-            lcd_msg(None, str(round(ampg)) if ampg is not None else "----")
+            lcd_msg(None, str(round(ampg), 2) if ampg is not None else "----")
             time.sleep(1)
 
         # Coolant temp
-        lcd_msg("Coolant temp:", None, True)
+        lcd_msg("Coolant temp:", clear_lcd=True)
         for _ in range(5):
             temp = state["coolant_temp"]
-            lcd_msg(None, str(temp) + "C" if temp is not None else "----")
+            lcd_msg(None, str(temp) + "°C" if temp is not None else "----")
             time.sleep(1)
 
         # Fuel level
